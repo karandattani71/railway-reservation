@@ -9,7 +9,6 @@ const TICKET_STATUS = {
   CONFIRMED: "CONFIRMED",
   RAC: "RAC",
   WAITING_LIST: "WAITING_LIST",
-  CANCELLED: "CANCELLED",
   CHILD_NO_BERTH: "CHILD_NO_BERTH", // New status for children under 5
 };
 

@@ -19,7 +19,6 @@ const checkAvailability = async (transaction) => {
     Ticket.count({
       where: {
         status: TICKET_STATUS.CONFIRMED,
-        [Op.not]: { status: TICKET_STATUS.CHILD_NO_BERTH },
       },
       transaction,
     }),
@@ -98,104 +97,6 @@ const createTicketData = async (passenger, availability, transaction) => {
   return ticketData;
 };
 
-const promoteTickets = async (cancelledTicket, transaction) => {
-  // Only promote tickets if a confirmed ticket is cancelled
-  if (cancelledTicket.status !== TICKET_STATUS.CONFIRMED) {
-    return;
-  }
-
-  // Step 1: Find the next RAC ticket to promote to confirmed
-  const nextRacTicket = await Ticket.findOne({
-    where: { status: TICKET_STATUS.RAC },
-    order: [["createdAt", "ASC"]],
-    include: [
-      {
-        model: Passenger,
-        attributes: ["age", "hasChild"],
-      },
-    ],
-    transaction,
-  });
-
-  if (nextRacTicket) {
-    // Promote RAC ticket to confirmed with appropriate berth allocation
-    const berthType = await allocateBerth(nextRacTicket.Passenger, transaction);
-    await nextRacTicket.update(
-      {
-        status: TICKET_STATUS.CONFIRMED,
-        berthType: berthType,
-        berthNumber: cancelledTicket.berthNumber,
-        racNumber: null,
-      },
-      { transaction }
-    );
-
-    // Step 2: Find the next waiting list ticket to promote to RAC
-    const nextWaitingListTicket = await Ticket.findOne({
-      where: { status: TICKET_STATUS.WAITING_LIST },
-      order: [["createdAt", "ASC"]],
-      transaction,
-    });
-
-    if (nextWaitingListTicket) {
-      // Promote waiting list ticket to RAC
-      await nextWaitingListTicket.update(
-        {
-          status: TICKET_STATUS.RAC,
-          berthType: BERTH_TYPE.SIDE_LOWER,
-          waitingListNumber: null,
-          racNumber: nextRacTicket.racNumber, // Assign the previous RAC number
-        },
-        { transaction }
-      );
-
-      // Reorder remaining waiting list numbers
-      await Ticket.update(
-        {
-          waitingListNumber: sequelize.literal("waitingListNumber - 1"),
-        },
-        {
-          where: {
-            status: TICKET_STATUS.WAITING_LIST,
-            waitingListNumber: {
-              [Op.gt]: nextWaitingListTicket.waitingListNumber,
-            },
-          },
-          transaction,
-        }
-      );
-    }
-
-    // Reorder remaining RAC numbers
-    await Ticket.update(
-      {
-        racNumber: sequelize.literal("racNumber - 1"),
-      },
-      {
-        where: {
-          status: TICKET_STATUS.RAC,
-          racNumber: {
-            [Op.gt]: nextRacTicket.racNumber,
-          },
-        },
-        transaction,
-      }
-    );
-  }
-
-  // Finally, update the cancelled ticket's status
-  await cancelledTicket.update(
-    {
-      status: TICKET_STATUS.CANCELLED,
-      berthNumber: null,
-      berthType: null,
-      racNumber: null,
-      waitingListNumber: null,
-    },
-    { transaction }
-  );
-};
-
 const getTicketSummary = (tickets) => ({
   total: tickets.length,
   confirmed: tickets.filter((t) => t.status === TICKET_STATUS.CONFIRMED).length,
@@ -207,9 +108,143 @@ const getTicketSummary = (tickets) => ({
   ).length,
 });
 
+const cancelTicket = async (ticketId, transaction) => {
+  const ticket = await Ticket.findByPk(ticketId, {
+    include: [Passenger],
+    transaction,
+  });
+
+  if (!ticket) {
+    throw new Error("Ticket not found");
+  }
+
+  if (ticket.status === TICKET_STATUS.CANCELLED) {
+    throw new Error("Ticket is already cancelled");
+  }
+
+  const originalStatus = ticket.status;
+
+  // Update the current ticket to cancelled
+  await ticket.update({ status: "CANCELLED" }, { transaction });
+
+  // If the cancelled ticket was confirmed, promote RAC to confirmed
+  if (originalStatus === TICKET_STATUS.CONFIRMED) {
+    const nextRacTicket = await Ticket.findOne({
+      where: { status: TICKET_STATUS.RAC },
+      order: [["racNumber", "ASC"]],
+      transaction,
+    });
+
+    if (nextRacTicket) {
+      // Promote RAC to confirmed
+      await nextRacTicket.update(
+        {
+          status: TICKET_STATUS.CONFIRMED,
+          berthType: ticket.berthType,
+          berthNumber: ticket.berthNumber,
+          racNumber: null,
+        },
+        { transaction }
+      );
+
+      // Find next waiting list ticket to promote to RAC
+      const nextWaitingTicket = await Ticket.findOne({
+        where: { status: TICKET_STATUS.WAITING_LIST },
+        order: [["waitingListNumber", "ASC"]],
+        transaction,
+      });
+
+      if (nextWaitingTicket) {
+        // Promote waiting list to RAC
+        await nextWaitingTicket.update(
+          {
+            status: TICKET_STATUS.RAC,
+            racNumber: nextRacTicket.racNumber,
+            waitingListNumber: null,
+          },
+          { transaction }
+        );
+
+        // Reorder remaining waiting list numbers
+        await Ticket.update(
+          { waitingListNumber: sequelize.literal('"waitingListNumber" - 1') },
+          {
+            where: {
+              status: TICKET_STATUS.WAITING_LIST,
+              waitingListNumber: {
+                [Op.gt]: nextWaitingTicket.waitingListNumber,
+              },
+            },
+            transaction,
+          }
+        );
+      }
+    }
+  }
+  // If the cancelled ticket was RAC, promote waiting list to RAC
+  else if (originalStatus === TICKET_STATUS.RAC) {
+    const nextWaitingTicket = await Ticket.findOne({
+      where: { status: TICKET_STATUS.WAITING_LIST },
+      order: [["waitingListNumber", "ASC"]],
+      transaction,
+    });
+
+    if (nextWaitingTicket) {
+      // Promote waiting list to RAC
+      await nextWaitingTicket.update(
+        {
+          status: TICKET_STATUS.RAC,
+          racNumber: ticket.racNumber,
+          waitingListNumber: null,
+        },
+        { transaction }
+      );
+
+      // Reorder remaining waiting list numbers
+      await Ticket.update(
+        { waitingListNumber: sequelize.literal('"waitingListNumber" - 1') },
+        {
+          where: {
+            status: TICKET_STATUS.WAITING_LIST,
+            waitingListNumber: { [Op.gt]: nextWaitingTicket.waitingListNumber },
+          },
+          transaction,
+        }
+      );
+    }
+
+    // Reorder remaining RAC numbers
+    await Ticket.update(
+      { racNumber: sequelize.literal('"racNumber" - 1') },
+      {
+        where: {
+          status: TICKET_STATUS.RAC,
+          racNumber: { [Op.gt]: ticket.racNumber },
+        },
+        transaction,
+      }
+    );
+  }
+  // If the cancelled ticket was waiting list, reorder remaining waiting list numbers
+  else if (originalStatus === TICKET_STATUS.WAITING_LIST) {
+    await Ticket.update(
+      { waitingListNumber: sequelize.literal('"waitingListNumber" - 1') },
+      {
+        where: {
+          status: TICKET_STATUS.WAITING_LIST,
+          waitingListNumber: { [Op.gt]: ticket.waitingListNumber },
+        },
+        transaction,
+      }
+    );
+  }
+
+  return ticket;
+};
+
 module.exports = {
   checkAvailability,
   createTicketData,
-  promoteTickets,
   getTicketSummary,
+  cancelTicket,
 };

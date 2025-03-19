@@ -58,13 +58,13 @@ const ticketIdValidation = [
 
 // Routes
 router.post("/book", bookingValidation, ticketController.bookTicket);
+router.get("/booked", ticketController.getBookedTickets);
+router.get("/available", ticketController.getAvailableTickets);
+router.get("/:ticketId", ticketIdValidation, ticketController.getTicketById);
 router.post(
   "/cancel/:ticketId",
   ticketIdValidation,
   ticketController.cancelTicket
 );
-router.get("/booked", ticketController.getBookedTickets);
-router.get("/available", ticketController.getAvailableTickets);
-router.get("/:ticketId", ticketIdValidation, ticketController.getTicketById);
 
 module.exports = router;

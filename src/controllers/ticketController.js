@@ -60,35 +60,6 @@ exports.bookTicket = async (req, res, next) => {
   }
 };
 
-exports.cancelTicket = async (req, res, next) => {
-  const transaction = await sequelize.transaction();
-
-  try {
-    const { ticketId } = req.params;
-    const ticket = await Ticket.findByPk(ticketId, { transaction });
-
-    if (!ticket) {
-      throw new AppError("Ticket not found", 404);
-    }
-
-    if (ticket.status === TICKET_STATUS.CANCELLED) {
-      throw new AppError("Ticket is already cancelled", 400);
-    }
-
-    await ticket.update({ status: TICKET_STATUS.CANCELLED }, { transaction });
-    await ticketService.promoteTickets(ticket, transaction);
-    await transaction.commit();
-
-    res.json({
-      status: "success",
-      message: "Ticket cancelled successfully",
-    });
-  } catch (error) {
-    await transaction.rollback();
-    next(error);
-  }
-};
-
 exports.getBookedTickets = async (req, res, next) => {
   try {
     const tickets = await Ticket.findAll({
@@ -192,6 +163,31 @@ exports.getTicketById = async (req, res, next) => {
       },
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+exports.cancelTicket = async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const { ticketId } = req.params;
+    const cancelledTicket = await ticketService.cancelTicket(
+      ticketId,
+      transaction
+    );
+
+    await transaction.commit();
+
+    res.json({
+      status: "success",
+      message: "Ticket cancelled successfully",
+      data: {
+        ticket: cancelledTicket,
+      },
+    });
+  } catch (error) {
+    await transaction.rollback();
     next(error);
   }
 };

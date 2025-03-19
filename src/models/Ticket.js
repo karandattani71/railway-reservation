@@ -9,13 +9,7 @@ const Ticket = sequelize.define("Ticket", {
     primaryKey: true,
   },
   status: {
-    type: DataTypes.ENUM(
-      "CONFIRMED",
-      "RAC",
-      "WAITING_LIST",
-      "CANCELLED",
-      "CHILD_NO_BERTH"
-    ),
+    type: DataTypes.ENUM("CONFIRMED", "RAC", "WAITING_LIST", "CHILD_NO_BERTH"),
     allowNull: false,
   },
   berthType: {
