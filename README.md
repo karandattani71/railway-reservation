@@ -61,8 +61,19 @@ A RESTful API for managing railway ticket reservations with support for confirme
 ## Setup Instructions
 
 1. Clone the repository
+
+```bash
+git clone https://github.com/karandattani71/railway-reservation.git
+```
+
 2. Navigate to the project directory
+
+```bash
+cd railway-ticket-reservation
+```
+
 3. Run the following command to start the application:
+
 
 ```bash
 docker-compose up --build
