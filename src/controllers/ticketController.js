@@ -6,22 +6,32 @@ const { TICKET_STATUS, BERTH_CONFIG } = require("../constants/ticketConstants");
 const ticketService = require("../services/ticketService");
 const { AppError } = require("../middleware/errorHandler");
 
+// Helper function for generating booking reference
+const generateBookingReference = () => {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2, 7).toUpperCase();
+  return `TKT${timestamp}${random}`;
+};
+
 // Controller methods
 exports.bookTicket = async (req, res, next) => {
   const transaction = await sequelize.transaction();
 
   try {
     const { passenger } = req.body;
+    const childPassenger = passenger.childPassenger;
 
-    // For children under 5, we don't need to check availability
-    const availability =
-      passenger.age < 5
-        ? { confirmedAvailable: 0, racAvailable: 0, waitlistAvailable: 0 }
-        : await ticketService.checkAvailability(transaction);
+    // Validate child passenger registration
+    if (childPassenger) {
+      if (childPassenger.age >= 5) {
+        throw new AppError("Child passenger must be under 5 years old", 400);
+      }
+    }
 
-    // Only check availability for passengers 5 and older
+    // Check availability only for adult passenger
+    const availability = await ticketService.checkAvailability(transaction);
+
     if (
-      passenger.age >= 5 &&
       availability.confirmedAvailable <= 0 &&
       availability.racAvailable <= 0 &&
       availability.waitlistAvailable <= 0
@@ -29,29 +39,75 @@ exports.bookTicket = async (req, res, next) => {
       throw new AppError("No tickets available in any category", 400);
     }
 
+    // Create adult passenger
     const newPassenger = await Passenger.create(passenger, { transaction });
     const ticketData = await ticketService.createTicketData(
       newPassenger,
       availability,
       transaction
     );
-    const ticket = await Ticket.create(ticketData, { transaction });
+    const adultTicket = await Ticket.create(ticketData, { transaction });
+
+    let childTicket = null;
+    // Create child passenger and ticket if provided
+    if (childPassenger) {
+      const newChildPassenger = await Passenger.create(
+        {
+          ...childPassenger,
+          contactNumber: passenger.contactNumber,
+          email: passenger.email,
+          hasChild: false,
+        },
+        { transaction }
+      );
+
+      const childTicketData = {
+        PassengerId: newChildPassenger.id,
+        status: TICKET_STATUS.CHILD_NO_BERTH,
+        bookingReference: generateBookingReference(),
+        berthType: null,
+        berthNumber: null,
+        parentTicketId: adultTicket.id,
+      };
+      childTicket = await Ticket.create(childTicketData, { transaction });
+    }
 
     await transaction.commit();
 
-    const responseMessage =
-      passenger.age < 5
-        ? "Child under 5 registered successfully (no berth allocated)"
-        : "Ticket booked successfully";
+    // Fetch complete ticket details including passengers
+    const completeAdultTicket = await Ticket.findByPk(adultTicket.id, {
+      include: [
+        {
+          model: Passenger,
+          attributes: [
+            "name",
+            "age",
+            "gender",
+            "contactNumber",
+            "email",
+            "hasChild",
+          ],
+        },
+        {
+          model: Ticket,
+          as: "childTicket",
+          include: [
+            {
+              model: Passenger,
+              attributes: ["name", "age", "gender"],
+            },
+          ],
+        },
+      ],
+    });
 
     res.status(201).json({
       status: "success",
-      message: responseMessage,
+      message: childTicket
+        ? "Tickets booked successfully for adult and child"
+        : "Ticket booked successfully",
       data: {
-        ticket: {
-          ...ticket.toJSON(),
-          passenger: newPassenger.toJSON(),
-        },
+        ticket: completeAdultTicket,
       },
     });
   } catch (error) {
@@ -67,6 +123,7 @@ exports.getBookedTickets = async (req, res, next) => {
         status: {
           [Op.notIn]: [TICKET_STATUS.CANCELLED],
         },
+        parentTicketId: null, // Only fetch parent tickets
       },
       include: [
         {
@@ -78,6 +135,16 @@ exports.getBookedTickets = async (req, res, next) => {
             "contactNumber",
             "email",
             "hasChild",
+          ],
+        },
+        {
+          model: Ticket,
+          as: "childTicket",
+          include: [
+            {
+              model: Passenger,
+              attributes: ["name", "age", "gender"],
+            },
           ],
         },
       ],
@@ -98,9 +165,7 @@ exports.getBookedTickets = async (req, res, next) => {
           waitingList: tickets.filter(
             (t) => t.status === TICKET_STATUS.WAITING_LIST
           ),
-          childrenNoBerth: tickets.filter(
-            (t) => t.status === TICKET_STATUS.CHILD_NO_BERTH
-          ),
+          childrenNoBerth: tickets.filter((t) => t.childTicket !== null),
         },
       },
     });
@@ -136,6 +201,7 @@ exports.getAvailableTickets = async (req, res, next) => {
 exports.getTicketById = async (req, res, next) => {
   try {
     const { ticketId } = req.params;
+
     const ticket = await Ticket.findByPk(ticketId, {
       include: [
         {
@@ -147,6 +213,33 @@ exports.getTicketById = async (req, res, next) => {
             "contactNumber",
             "email",
             "hasChild",
+          ],
+        },
+        {
+          model: Ticket,
+          as: "childTicket",
+          include: [
+            {
+              model: Passenger,
+              attributes: ["name", "age", "gender"],
+            },
+          ],
+        },
+        {
+          model: Ticket,
+          as: "parentTicket",
+          include: [
+            {
+              model: Passenger,
+              attributes: [
+                "name",
+                "age",
+                "gender",
+                "contactNumber",
+                "email",
+                "hasChild",
+              ],
+            },
           ],
         },
       ],

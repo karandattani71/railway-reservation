@@ -13,6 +13,14 @@ const validateAge = (value) => {
   return true;
 };
 
+// Custom validation for child age
+const validateChildAge = (value) => {
+  if (value < 0 || value >= 5) {
+    throw new Error("Child passenger must be under 5 years old");
+  }
+  return true;
+};
+
 // Validation middleware for booking
 const bookingValidation = [
   body("passenger.name")
@@ -46,6 +54,26 @@ const bookingValidation = [
     .optional()
     .isBoolean()
     .withMessage("hasChild must be true or false"),
+
+  // Child passenger validation (optional)
+  body("passenger.childPassenger.name")
+    .if(body("passenger.hasChild").equals(true))
+    .trim()
+    .notEmpty()
+    .withMessage("Child name is required when hasChild is true")
+    .isLength({ min: 2, max: 50 })
+    .withMessage("Child name must be between 2 and 50 characters"),
+
+  body("passenger.childPassenger.age")
+    .if(body("passenger.hasChild").equals(true))
+    .isInt()
+    .custom(validateChildAge)
+    .withMessage("Child age must be under 5 years"),
+
+  body("passenger.childPassenger.gender")
+    .if(body("passenger.hasChild").equals(true))
+    .isIn(["MALE", "FEMALE", "OTHER"])
+    .withMessage("Child gender must be MALE, FEMALE, or OTHER"),
 
   validateRequest,
 ];

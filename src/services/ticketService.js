@@ -71,12 +71,11 @@ const createTicketData = async (passenger, availability, transaction) => {
     bookingReference: generateBookingReference(),
   };
 
-  // Children under 5 don't get a berth
+  // Prevent direct ticket booking for children under 5
   if (passenger.age < 5) {
-    ticketData.status = TICKET_STATUS.CHILD_NO_BERTH;
-    ticketData.berthType = null;
-    ticketData.berthNumber = null;
-    return ticketData;
+    throw new Error(
+      "Children under 5 years cannot book tickets directly. They must be registered with an adult passenger."
+    );
   }
 
   if (availability.confirmedAvailable > 0) {
@@ -247,4 +246,5 @@ module.exports = {
   createTicketData,
   getTicketSummary,
   cancelTicket,
+  generateBookingReference,
 };
