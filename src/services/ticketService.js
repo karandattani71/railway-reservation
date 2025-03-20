@@ -6,7 +6,7 @@ const {
 } = require("../constants/ticketConstants");
 const Ticket = require("../models/Ticket");
 const Passenger = require("../models/Passenger");
-const sequelize = require("sequelize");
+const sequelize = require("../config/database");
 
 const generateBookingReference = () => {
   const timestamp = Date.now();
@@ -14,28 +14,77 @@ const generateBookingReference = () => {
   return `TKT${timestamp}${random}`;
 };
 
-const checkAvailability = async (transaction) => {
-  const [confirmed, rac, waitlist] = await Promise.all([
-    Ticket.count({
-      where: {
-        status: TICKET_STATUS.CONFIRMED,
-      },
-      transaction,
+const checkAvailability = async (transaction = null) => {
+  const queryOptions = transaction ? { transaction } : {};
+  const lockOptions = transaction
+    ? { transaction, lock: transaction.LOCK.UPDATE }
+    : {};
+
+  // Get all tickets for each status
+  const [confirmedTickets, racTickets, waitlistTickets] = await Promise.all([
+    Ticket.findAll({
+      where: { status: TICKET_STATUS.CONFIRMED },
+      attributes: ["id", "berthNumber"],
+      ...lockOptions,
     }),
-    Ticket.count({
+    Ticket.findAll({
       where: { status: TICKET_STATUS.RAC },
-      transaction,
+      attributes: ["id", "racNumber"],
+      ...lockOptions,
     }),
-    Ticket.count({
+    Ticket.findAll({
       where: { status: TICKET_STATUS.WAITING_LIST },
-      transaction,
+      attributes: ["id", "waitingListNumber"],
+      ...lockOptions,
     }),
   ]);
 
+  // Calculate counts
+  const confirmed = confirmedTickets.length;
+  const rac = racTickets.length;
+  const waitlist = waitlistTickets.length;
+
+  // Get booked berth numbers
+  const bookedBerthNumbers = new Set(
+    confirmedTickets
+      .filter((t) => t.berthNumber !== null)
+      .map((t) => t.berthNumber)
+  );
+
+  const availableBerthNumbers = Array.from(
+    { length: BERTH_CONFIG.TOTAL },
+    (_, i) => i + 1
+  ).filter((num) => !bookedBerthNumbers.has(num));
+
+  // Get booked RAC numbers
+  const bookedRacNums = new Set(
+    racTickets.filter((t) => t.racNumber !== null).map((t) => t.racNumber)
+  );
+
+  const availableRacNumbers = Array.from(
+    { length: BERTH_CONFIG.RAC * 2 },
+    (_, i) => i + 1
+  ).filter((num) => !bookedRacNums.has(num));
+
+  // Get booked waiting list numbers
+  const bookedWaitingNums = new Set(
+    waitlistTickets
+      .filter((t) => t.waitingListNumber !== null)
+      .map((t) => t.waitingListNumber)
+  );
+
+  const availableWaitingNumbers = Array.from(
+    { length: BERTH_CONFIG.WAITING_LIST },
+    (_, i) => i + 1
+  ).filter((num) => !bookedWaitingNums.has(num));
+
   return {
-    confirmedAvailable: BERTH_CONFIG.TOTAL - confirmed,
-    racAvailable: BERTH_CONFIG.RAC * 2 - rac,
-    waitlistAvailable: BERTH_CONFIG.WAITING_LIST - waitlist,
+    confirmedAvailable: availableBerthNumbers.length,
+    racAvailable: availableRacNumbers.length,
+    waitlistAvailable: availableWaitingNumbers.length,
+    availableBerthNumbers,
+    availableRacNumbers,
+    availableWaitingNumbers,
   };
 };
 
@@ -44,25 +93,40 @@ const needsPriorityAllocation = (passenger) => {
   return age >= 60 || hasChild;
 };
 
-const allocateBerth = async (passenger, transaction) => {
+const allocateBerth = async (passenger, availableBerthNumbers, transaction) => {
   if (!needsPriorityAllocation(passenger)) {
     const berthTypes = [BERTH_TYPE.UPPER, BERTH_TYPE.MIDDLE, BERTH_TYPE.LOWER];
-    return berthTypes[Math.floor(Math.random() * berthTypes.length)];
+    return {
+      berthType: berthTypes[Math.floor(Math.random() * berthTypes.length)],
+      berthNumber: availableBerthNumbers[0],
+    };
   }
 
-  const lowerBerthAvailable = await Ticket.count({
+  // Get lower berths that are already allocated
+  const lowerBerthTickets = await Ticket.findAll({
     where: {
       status: TICKET_STATUS.CONFIRMED,
       berthType: BERTH_TYPE.LOWER,
     },
+    attributes: ["id"],
     transaction,
+    lock: transaction.LOCK.UPDATE,
   });
 
-  return lowerBerthAvailable < BERTH_CONFIG.LOWER_BERTH_QUOTA
-    ? BERTH_TYPE.LOWER
-    : [BERTH_TYPE.UPPER, BERTH_TYPE.MIDDLE, BERTH_TYPE.LOWER][
-        Math.floor(Math.random() * 3)
-      ];
+  // Check if we can allocate a lower berth
+  if (lowerBerthTickets.length < BERTH_CONFIG.LOWER_BERTH_QUOTA) {
+    return {
+      berthType: BERTH_TYPE.LOWER,
+      berthNumber: availableBerthNumbers[0],
+    };
+  }
+
+  // If no lower berth available, allocate randomly
+  const berthTypes = [BERTH_TYPE.UPPER, BERTH_TYPE.MIDDLE, BERTH_TYPE.LOWER];
+  return {
+    berthType: berthTypes[Math.floor(Math.random() * berthTypes.length)],
+    berthNumber: availableBerthNumbers[0],
+  };
 };
 
 const createTicketData = async (passenger, availability, transaction) => {
@@ -78,19 +142,69 @@ const createTicketData = async (passenger, availability, transaction) => {
     );
   }
 
-  if (availability.confirmedAvailable > 0) {
+  // Double-check availability with locks before proceeding
+  const currentAvailability = await checkAvailability(transaction);
+
+  if (currentAvailability.confirmedAvailable > 0) {
+    const berth = await allocateBerth(
+      passenger,
+      currentAvailability.availableBerthNumbers,
+      transaction
+    );
     ticketData.status = TICKET_STATUS.CONFIRMED;
-    ticketData.berthType = await allocateBerth(passenger, transaction);
-    ticketData.berthNumber = availability.confirmedAvailable;
-  } else if (availability.racAvailable > 0) {
+    ticketData.berthType = berth.berthType;
+    ticketData.berthNumber = berth.berthNumber;
+  } else if (currentAvailability.racAvailable > 0) {
     ticketData.status = TICKET_STATUS.RAC;
     ticketData.berthType = BERTH_TYPE.SIDE_LOWER;
-    ticketData.racNumber = availability.racAvailable;
-  } else if (availability.waitlistAvailable > 0) {
+    ticketData.racNumber = currentAvailability.availableRacNumbers[0];
+  } else if (currentAvailability.waitlistAvailable > 0) {
     ticketData.status = TICKET_STATUS.WAITING_LIST;
-    ticketData.waitingListNumber = availability.waitlistAvailable;
+    ticketData.waitingListNumber =
+      currentAvailability.availableWaitingNumbers[0];
   } else {
     throw new Error("No tickets available");
+  }
+
+  // Build where conditions based on ticket status
+  let whereConditions = [];
+  if (ticketData.status === TICKET_STATUS.CONFIRMED && ticketData.berthNumber) {
+    whereConditions.push({
+      berthNumber: ticketData.berthNumber,
+      status: TICKET_STATUS.CONFIRMED,
+    });
+  }
+  if (ticketData.status === TICKET_STATUS.RAC && ticketData.racNumber) {
+    whereConditions.push({
+      racNumber: ticketData.racNumber,
+      status: TICKET_STATUS.RAC,
+    });
+  }
+  if (
+    ticketData.status === TICKET_STATUS.WAITING_LIST &&
+    ticketData.waitingListNumber
+  ) {
+    whereConditions.push({
+      waitingListNumber: ticketData.waitingListNumber,
+      status: TICKET_STATUS.WAITING_LIST,
+    });
+  }
+
+  // Verify no concurrent booking has taken this spot
+  if (whereConditions.length > 0) {
+    const existingTicket = await Ticket.findOne({
+      where: {
+        [Op.or]: whereConditions,
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (existingTicket) {
+      throw new Error(
+        "This ticket has just been booked by another user. Please try again."
+      );
+    }
   }
 
   return ticketData;
